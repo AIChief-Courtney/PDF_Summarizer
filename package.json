@@ -1,0 +1,21 @@
+{
+  "name": "pdf-summarizer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm run build --prefix client",
+    "start": "npm run build --prefix client && npm run start --prefix server"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "openai": "^4.77.0",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "pdf-lib": "^1.17.1"
+  }
+}
