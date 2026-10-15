@@ -1,10 +1,14 @@
 node_modules/
 **/node_modules/
 client/dist/
+data/
 .env
 .env.local
 .env.*.local
+client/.env
 !.env.example
+!client/.env.example
 *.log
 .DS_Store
 .vercel
+.env*

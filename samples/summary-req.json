@@ -1,0 +1,10 @@
+{
+  "config": {
+    "method": "quick",
+    "audience": "clinical",
+    "length": "short",
+    "format": "bullets",
+    "sourceMode": "documents",
+    "documentIds": ["8fce6d46-9ed7-482d-ab4f-dad3346a1a4b"]
+  }
+}

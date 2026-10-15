@@ -1,12 +1,15 @@
-# PDF Summarizer
+# Clinical Document RAG (MedKaz-style portal)
 
-Small full-stack app: upload one English PDF, extract text on the server, summarize with OpenAI, and show the result in the browser.
+Full-stack medical document workspace: upload & index PDFs, configure summarization, review cited summaries, and ask follow-up questions with optional de-identified web enrichment.
+
+Evolved from the prior `pdf-summarizer` client and reuses the **Chroma + embeddings** pattern from `Chat-with-PDF-Chatbot` (Python), now implemented on the Node server.
 
 ## Prerequisites
 
-- Node.js 18 or newer
-- npm
-- An [OpenAI API key](https://platform.openai.com/api-keys)
+- Node.js 18+
+- OpenAI API key (server-side)
+- Optional: [Tavily](https://tavily.com/) API key for web enrichment
+- Optional: Chroma server (`CHROMA_URL`) — if unavailable, SQLite chunks still power retrieval fallback
 
 ## Setup
 
@@ -14,14 +17,11 @@ Small full-stack app: upload one English PDF, extract text on the server, summar
 cd pdf-summarizer
 npm install
 npm run install:all
-cp .env.example .env
+copy .env.example .env   # Windows
+# Set OPENAI_API_KEY in .env
 ```
 
-Edit `.env` and set `OPENAI_API_KEY`.
-
-## Run (development)
-
-Two processes (API + Vite dev server with proxy):
+## Run
 
 ```bash
 npm run dev
@@ -30,89 +30,61 @@ npm run dev
 - UI: http://localhost:5173  
 - API: http://localhost:3001  
 
-## Run (production-style)
-
-Build the client and serve it from Express:
+Production-style:
 
 ```bash
 npm start
 ```
 
-Open http://localhost:3001
+## Environment variables (names only)
 
-## Environment variables
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | Summaries, chat, embeddings |
+| `OPENAI_MODEL` | Chat model (default `gpt-4o-mini`) |
+| `OPENAI_EMBED_MODEL` | Embeddings (default `text-embedding-3-small`) |
+| `TAVILY_API_KEY` | Optional web search |
+| `CHROMA_URL` | Optional external Chroma |
+| `PORT` | API port (default `3001`) |
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENAI_API_KEY` | Yes | Server-side OpenAI key |
-| `OPENAI_MODEL` | No | Default: `gpt-4o-mini` |
-| `PORT` | No | Default: `3001` |
+Do **not** put API keys in the React client.
 
-## Limits (enforced on client and server)
+## API routes
 
-- One PDF per request
-- Max file size: **5 MB**
-- Max pages: **20**
-- Max extracted text: **30,000 characters**
-- English, selectable text (no OCR)
+- `POST /api/documents` — upload PDFs (multipart `files`)
+- `GET /api/documents`
+- `GET /api/documents/:id`
+- `GET /api/documents/:id/file` — PDF preview
+- `POST /api/documents/:id/retry`
+- `POST /api/summaries` — start summary job
+- `GET /api/summaries/:id`
+- `GET /api/jobs/:id`
+- `POST /api/conversations`
+- `POST /api/conversations/:id/messages`
+- `GET /api/health`, `/api/categories`, `/api/workspace`
 
-## API
+## Architecture
 
-### `POST /api/summarize`
+- **SQLite** (`data/app.db`) — documents, chunks, jobs, summaries, conversations
+- **Chroma** — vector index per patient (when OpenAI + Chroma available)
+- **In-process jobs** — ingest & summarize queues
+- **React** — sidebar app shell, evidence drawer, MedKaz-inspired styling
 
-- **Content-Type:** `multipart/form-data`
-- **Field:** `file` (PDF)
+## Limitations (honest)
 
-**Success (200):**
+- Demo workspace/patient headers (`X-Workspace-Id`, `X-Patient-Id`) — not full auth/RBAC yet
+- OCR for scanned PDFs not implemented (`needs_review` when no text)
+- Citation highlight coordinates not extracted (page-level preview only)
+- Vercel static deploy **does not** run this API; use `npm start` or a Node host
+- Comprehensive summary uses batching/heuristics; always review coverage section
 
-```json
-{ "summary": "The document explains..." }
-```
+## Verification checklist
 
-**Error (4xx/5xx):**
+- [ ] Upload PDF → statuses progress to `ready` or `needs_review`
+- [ ] Summary methods return different structured output
+- [ ] Citations open document preview drawer
+- [ ] Ask AI returns document-grounded answers
+- [ ] Web mode off → no Tavily calls; web mode on without key → clear unavailable section
+- [ ] Missing `OPENAI_API_KEY` → 503 with message (no fake AI text)
 
-```json
-{
-  "error": {
-    "code": "NO_TEXT",
-    "message": "No readable text was found in this PDF."
-  }
-}
-```
-
-Stable error codes include: `NO_FILE`, `INVALID_PDF`, `FILE_TOO_LARGE`, `TOO_MANY_PAGES`, `TEXT_TOO_LONG`, `NO_TEXT`, `PASSWORD_PROTECTED`, `CONFIG_ERROR`, `PROVIDER_UNAVAILABLE`, `TIMEOUT`, `SERVER_ERROR`.
-
-### `GET /api/health`
-
-Returns `{ "ok": true }`.
-
-## Sample PDF
-
-Generate a local test file (optional):
-
-```bash
-node scripts/create-sample-pdf.mjs
-```
-
-Output: `samples/sample-text.pdf`
-
-## Known limitations
-
-- No OCR for scanned PDFs
-- No password unlocking
-- No upload history or database storage
-- Single provider (OpenAI) and model via environment variables
-
-## Deploy on Vercel
-
-1. Push this repository to GitHub (see below).
-2. Import the repo at [vercel.com/new](https://vercel.com/new).
-3. Set **Root Directory** to the repo root (default).
-4. Add environment variable **`OPENAI_API_KEY`** (and optional `OPENAI_MODEL`).
-5. Deploy. The static UI and `/api/summarize` serverless function run on the same domain.
-
-Local dev still uses the Express server on port 3001; production on Vercel uses the `api/` routes.
-
-## Manual verification
-
-See [VERIFICATION.md](./VERIFICATION.md).
+See `VERIFICATION.md` for the original test brief.

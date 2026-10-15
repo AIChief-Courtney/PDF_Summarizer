@@ -1,10 +1,19 @@
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { LIMITS } from "../constants.js";
-import { AppError } from "../errors.js";
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
+import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { LIMITS } from "./constants.js";
+
+GlobalWorkerOptions.workerSrc = pdfWorker;
+
+export class PdfUserError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 
 function isPdfBuffer(buffer) {
-  if (!buffer || buffer.length < 5) return false;
-  const header = buffer.subarray(0, 5).toString("ascii");
+  if (!buffer || buffer.byteLength < 5) return false;
+  const header = new TextDecoder().decode(buffer.slice(0, 5));
   return header.startsWith("%PDF-");
 }
 
@@ -28,14 +37,12 @@ async function loadPdfDocument(buffer) {
   } catch (err) {
     const msg = err?.message || String(err);
     if (isPasswordError(msg)) {
-      throw new AppError(
-        400,
+      throw new PdfUserError(
         "PASSWORD_PROTECTED",
         "This PDF is password-protected. Please upload an unlocked PDF."
       );
     }
-    throw new AppError(
-      400,
+    throw new PdfUserError(
       "INVALID_PDF",
       "We could not read this PDF. It may be corrupt or unsupported."
     );
@@ -55,10 +62,10 @@ async function extractTextFromPdf(pdf) {
   return parts.join("\n").replace(/\s+/g, " ").trim();
 }
 
-export async function extractPdfText(buffer) {
+export async function extractPdfFromFile(file) {
+  const buffer = await file.arrayBuffer();
   if (!isPdfBuffer(buffer)) {
-    throw new AppError(
-      400,
+    throw new PdfUserError(
       "INVALID_PDF",
       "Please upload a valid PDF file."
     );
@@ -68,29 +75,35 @@ export async function extractPdfText(buffer) {
   const pageCount = pdf.numPages;
 
   if (pageCount > LIMITS.maxPages) {
-    throw new AppError(
-      400,
+    throw new PdfUserError(
       "TOO_MANY_PAGES",
-      `This PDF has ${pageCount} pages. The limit is ${LIMITS.maxPages} pages.`
+      `This PDF has ${pageCount} pages. The limit is ${LIMITS.maxPages} pages per file.`
     );
   }
 
   const text = await extractTextFromPdf(pdf);
   if (!text) {
-    throw new AppError(
-      400,
+    throw new PdfUserError(
       "NO_TEXT",
       "No readable text was found in this PDF. Scanned images and OCR are not supported."
     );
   }
 
-  if (text.length > LIMITS.maxExtractedChars) {
-    throw new AppError(
-      400,
+  if (text.length > LIMITS.maxExtractedCharsPerFile) {
+    throw new PdfUserError(
       "TEXT_TOO_LONG",
-      `Extracted text exceeds ${LIMITS.maxExtractedChars.toLocaleString()} characters. Please use a shorter document.`
+      `Extracted text exceeds ${LIMITS.maxExtractedCharsPerFile.toLocaleString()} characters for this file.`
     );
   }
 
-  return { text, pageCount };
+  return { text, pageCount, charCount: text.length, fileBytes: file.size };
+}
+
+export function buildCombinedDocumentText(documents) {
+  return documents
+    .map(
+      (doc, index) =>
+        `=== DOCUMENT ${index + 1}: ${doc.name} ===\n${doc.text}`
+    )
+    .join("\n\n");
 }

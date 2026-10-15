@@ -1,16 +1,17 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "npm install && npm install --prefix client && npm install --prefix server",
+  "framework": null,
+  "installCommand": "npm install --prefix server && npm install --prefix client",
   "buildCommand": "npm run build --prefix client",
   "outputDirectory": "client/dist",
   "functions": {
-    "api/summarize.js": {
-      "maxDuration": 60
+    "api/server.js": {
+      "maxDuration": 120,
+      "memory": 1024
     }
   },
   "rewrites": [
-    { "source": "/api/summarize", "destination": "/api/summarize" },
-    { "source": "/api/health", "destination": "/api/health" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/api/(.*)", "destination": "/api/server" },
+    { "source": "/((?!assets/).*)", "destination": "/index.html" }
   ]
 }

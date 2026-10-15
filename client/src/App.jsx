@@ -1,42 +1,46 @@
 import { useRef, useState } from "react";
+import { LIMITS } from "./lib/constants.js";
+import {
+  buildCombinedDocumentText,
+  extractPdfFromFile,
+  PdfUserError,
+} from "./lib/pdfExtract.js";
+import {
+  DEFAULT_PRESET_ID,
+  PROMPT_PRESETS,
+  summarizeDocumentText,
+} from "./lib/summarize.js";
 import "./App.css";
 
-const MAX_BYTES = 5 * 1024 * 1024;
-const MAX_MB = 5;
-
-const LIMITS = [
-  { label: "Max size", value: `${MAX_MB} MB` },
-  { label: "Pages", value: "20" },
-  { label: "Text", value: "30k chars" },
-];
+const MAX_MB = LIMITS.maxFileBytes / (1024 * 1024);
 
 function formatBytes(bytes) {
+  if (bytes == null) return "—";
   if (bytes < 1024) return `${bytes} B`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function PdfIcon() {
+function formatCount(value) {
+  if (value == null) return "—";
+  return value.toLocaleString();
+}
+
+function fileKey(file) {
+  return `${file.name}-${file.size}-${file.lastModified}`;
+}
+
+function ClinicalDocIcon() {
   return (
-    <svg
-      className="icon-pdf"
-      viewBox="0 0 48 48"
-      fill="none"
-      aria-hidden="true"
-    >
+    <svg className="icon-clinical" viewBox="0 0 48 48" fill="none" aria-hidden="true">
       <path
-        d="M14 4h14l12 12v28a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z"
+        d="M12 6h16l8 8v26a4 4 0 0 1-4 4H12a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4z"
         stroke="currentColor"
         strokeWidth="2"
         strokeLinejoin="round"
       />
+      <path d="M28 6v8h8" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
       <path
-        d="M28 4v12h12"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M16 28h16M16 34h10"
+        d="M24 22v8M20 26h8"
         stroke="currentColor"
         strokeWidth="2"
         strokeLinecap="round"
@@ -47,62 +51,171 @@ function PdfIcon() {
 
 export default function App() {
   const inputRef = useRef(null);
-  const [file, setFile] = useState(null);
+  const [documents, setDocuments] = useState([]);
+  const [analyzing, setAnalyzing] = useState(false);
   const [status, setStatus] = useState({ type: "idle", message: "" });
   const [summary, setSummary] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [activePreset, setActivePreset] = useState(DEFAULT_PRESET_ID);
+  const [customPrompt, setCustomPrompt] = useState(
+    () => PROMPT_PRESETS.find((p) => p.id === DEFAULT_PRESET_ID)?.instruction ?? ""
+  );
 
   const isLoading = status.type === "loading";
+  const busy = isLoading || analyzing;
 
-  function resetForNewFile(selected) {
-    setFile(selected);
+  const okDocs = documents.filter((d) => d.status === "ok");
+  const totalBytes = okDocs.reduce((n, d) => n + d.fileBytes, 0);
+  const totalPages = okDocs.reduce((n, d) => n + d.pageCount, 0);
+  const totalChars = okDocs.reduce((n, d) => n + d.charCount, 0);
+  const combinedOver = totalChars > LIMITS.maxCombinedExtractedChars;
+
+  const docReady =
+    okDocs.length > 0 &&
+    !analyzing &&
+    !combinedOver &&
+    documents.every((d) => d.status === "ok");
+
+  const limitRows = [
+    {
+      key: "docs",
+      label: "Documents",
+      current: documents.length ? String(okDocs.length) : "—",
+      max: `${LIMITS.maxFiles} max`,
+      over: documents.length > LIMITS.maxFiles,
+      ok: okDocs.length > 0 && okDocs.length <= LIMITS.maxFiles,
+    },
+    {
+      key: "pages",
+      label: "Total pages",
+      current: okDocs.length ? formatCount(totalPages) : analyzing ? "…" : "—",
+      max: `${LIMITS.maxPages}/file`,
+      over: false,
+      ok: okDocs.length > 0,
+    },
+    {
+      key: "text",
+      label: "Combined text",
+      current:
+        okDocs.length
+          ? `${formatCount(totalChars)} chars`
+          : analyzing
+            ? "…"
+            : "—",
+      max: `${formatCount(LIMITS.maxCombinedExtractedChars)} max`,
+      over: combinedOver,
+      ok: okDocs.length > 0 && !combinedOver,
+    },
+  ];
+
+  function resetAll() {
+    setDocuments([]);
+    setAnalyzing(false);
     setSummary("");
     setStatus({ type: "idle", message: "" });
+    if (inputRef.current) inputRef.current.value = "";
   }
 
-  function validateClientFile(selected) {
-    if (!selected) return "Please select a PDF file.";
-    const name = selected.name.toLowerCase();
-    const type = selected.type;
+  function validateBasicFile(file) {
+    const name = file.name.toLowerCase();
+    const type = file.type;
     const isPdf = type === "application/pdf" || name.endsWith(".pdf");
-    if (!isPdf) {
-      return "Please upload a valid PDF file.";
-    }
-    if (selected.size > MAX_BYTES) {
-      return `This file exceeds the ${MAX_MB} MB size limit. Please choose a smaller PDF.`;
+    if (!isPdf) return `"${file.name}" is not a PDF.`;
+    if (file.size > LIMITS.maxFileBytes) {
+      return `"${file.name}" exceeds ${MAX_MB} MB.`;
     }
     return null;
   }
 
-  function applyFile(selected) {
-    if (!selected) {
-      resetForNewFile(null);
-      return;
+  async function analyzeFiles(files) {
+    setAnalyzing(true);
+    setSummary("");
+    setStatus({ type: "idle", message: "" });
+
+    const results = [];
+    for (const file of files) {
+      const basicError = validateBasicFile(file);
+      if (basicError) {
+        results.push({
+          id: fileKey(file),
+          name: file.name,
+          fileBytes: file.size,
+          status: "error",
+          error: basicError,
+        });
+        continue;
+      }
+      try {
+        const extracted = await extractPdfFromFile(file);
+        results.push({
+          id: fileKey(file),
+          name: file.name,
+          fileBytes: extracted.fileBytes,
+          pageCount: extracted.pageCount,
+          charCount: extracted.charCount,
+          text: extracted.text,
+          status: "ok",
+        });
+      } catch (err) {
+        results.push({
+          id: fileKey(file),
+          name: file.name,
+          fileBytes: file.size,
+          status: "error",
+          error:
+            err instanceof PdfUserError
+              ? err.message
+              : `Could not read "${file.name}".`,
+        });
+      }
     }
-    const clientError = validateClientFile(selected);
-    if (clientError) {
-      resetForNewFile(null);
-      setStatus({ type: "error", message: clientError });
-      if (inputRef.current) inputRef.current.value = "";
-      return;
+
+    setDocuments(results);
+
+    const ok = results.filter((d) => d.status === "ok");
+    const combined = ok.reduce((n, d) => n + d.charCount, 0);
+    if (ok.length && combined > LIMITS.maxCombinedExtractedChars) {
+      setStatus({
+        type: "error",
+        message: `Combined text (${formatCount(combined)} characters) exceeds the ${formatCount(LIMITS.maxCombinedExtractedChars)} limit. Remove a document or use shorter PDFs.`,
+      });
+    } else if (results.some((d) => d.status === "error")) {
+      setStatus({
+        type: "error",
+        message: "Some files could not be read. Remove failed files or upload replacements.",
+      });
     }
-    resetForNewFile(selected);
+
+    setAnalyzing(false);
+  }
+
+  function ingestFileList(fileList) {
+    if (!fileList?.length) return;
+    const incoming = Array.from(fileList);
+    if (incoming.length > LIMITS.maxFiles) {
+      setStatus({
+        type: "error",
+        message: `You can upload up to ${LIMITS.maxFiles} PDFs at a time. Only the first ${LIMITS.maxFiles} were kept.`,
+      });
+    }
+    const slice = incoming.slice(0, LIMITS.maxFiles);
+    analyzeFiles(slice);
   }
 
   function onFileChange(event) {
-    applyFile(event.target.files?.[0] ?? null);
+    ingestFileList(event.target.files);
   }
 
   function onDrop(event) {
     event.preventDefault();
     setDragOver(false);
-    if (isLoading) return;
-    applyFile(event.dataTransfer.files?.[0] ?? null);
+    if (busy) return;
+    ingestFileList(event.dataTransfer.files);
   }
 
   function onDragOver(event) {
     event.preventDefault();
-    if (!isLoading) setDragOver(true);
+    if (!busy) setDragOver(true);
   }
 
   function onDragLeave() {
@@ -110,84 +223,113 @@ export default function App() {
   }
 
   function openFilePicker() {
-    if (!isLoading) inputRef.current?.click();
+    if (!busy) inputRef.current?.click();
+  }
+
+  function removeDocument(id) {
+    setDocuments((prev) => {
+      const next = prev.filter((d) => d.id !== id);
+      if (next.length === 0 && inputRef.current) inputRef.current.value = "";
+      return next;
+    });
+    setSummary("");
+    setStatus({ type: "idle", message: "" });
+  }
+
+  function applyPreset(preset) {
+    setActivePreset(preset.id);
+    setCustomPrompt(preset.instruction);
   }
 
   async function onSubmit(event) {
     event.preventDefault();
-    if (!file || isLoading) return;
-
-    const clientError = validateClientFile(file);
-    if (clientError) {
-      setStatus({ type: "error", message: clientError });
-      return;
-    }
+    if (!docReady || isLoading) return;
 
     setSummary("");
-    setStatus({ type: "loading", message: "Analyzing document and generating summary…" });
-
-    const body = new FormData();
-    body.append("file", file);
+    setStatus({
+      type: "loading",
+      message: `Synthesizing ${okDocs.length} document${okDocs.length > 1 ? "s" : ""}…`,
+    });
 
     try {
-      const response = await fetch("/api/summarize", {
-        method: "POST",
-        body,
+      const combined = buildCombinedDocumentText(okDocs);
+      const result = await summarizeDocumentText(combined, customPrompt);
+      setSummary(result);
+      setStatus({
+        type: "success",
+        message: "Unified clinical summary ready. Verify against source records.",
       });
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        const message =
-          data?.error?.message || "Summarization failed. Please try again.";
-        setStatus({ type: "error", message });
-        return;
-      }
-
-      setSummary(data.summary || "");
-      setStatus({ type: "success", message: "Summary generated successfully." });
-    } catch {
+    } catch (err) {
       setStatus({
         type: "error",
-        message: "Network error. Check your connection and try again.",
+        message: err?.message || "Summarization failed. Please try again.",
       });
     }
   }
 
-  const showEmptySummary = !summary && !isLoading && status.type !== "loading";
+  const showEmptySummary = !summary && !isLoading;
 
   return (
     <div className="app">
-      <div className="app__backdrop" aria-hidden="true">
-        <div className="app__orb app__orb--1" />
-        <div className="app__orb app__orb--2" />
-        <div className="app__grid" />
-      </div>
+      <header className="site-header">
+        <div className="site-header__inner">
+          <a className="brand" href="#top" aria-label="Home">
+            <span className="brand__logo">medkaz</span>
+            <span className="brand__sub">Clinical document portal</span>
+          </a>
+          <nav className="site-nav" aria-label="Primary">
+            <a className="site-nav__link site-nav__link--active" href="#upload">
+              Upload
+            </a>
+            <a className="site-nav__link" href="#prompt">
+              Instructions
+            </a>
+            <a className="site-nav__link" href="#results">
+              Extract
+            </a>
+          </nav>
+          <div className="site-header__actions">
+            <button
+              type="button"
+              className="btn btn--green"
+              onClick={openFilePicker}
+              disabled={busy}
+            >
+              Upload PDFs
+            </button>
+          </div>
+        </div>
+      </header>
 
-      <div className="app__shell">
-        <header className="hero">
-          <div className="hero__badge">AI-powered document brief</div>
-          <h1 className="hero__title">PDF Summarizer</h1>
-          <p className="hero__subtitle">
-            Upload a text-based English PDF and receive a concise, accurate
-            summary in seconds—validated on the server before it reaches the
-            model.
+      <section className="hero-banner" id="top">
+        <div className="hero-banner__overlay">
+          <h1 className="hero-banner__title">
+            Up to five clinical documents — one unified summary
+          </h1>
+          <p className="hero-banner__text">
+            Upload discharge summaries, labs, and visit notes together. Choose
+            how you want them summarized, then extract exact clinical facts in
+            a single MedKaz-style brief.
           </p>
-        </header>
+        </div>
+      </section>
 
-        <div className="workspace">
-          <section className="panel panel--upload" aria-labelledby="upload-heading">
+      <main className="main-content">
+        <div className="workspace workspace--stack">
+          <section className="panel" id="upload" aria-labelledby="upload-heading">
             <div className="panel__head">
               <h2 id="upload-heading" className="panel__title">
-                Upload document
+                Upload clinical PDFs
               </h2>
               <p className="panel__desc" id="pdf-hint">
-                One PDF per request · selectable text only · no OCR
+                Up to {LIMITS.maxFiles} documents · {MAX_MB} MB each ·{" "}
+                {LIMITS.maxPages} pages each · selectable text · no OCR
               </p>
             </div>
 
             <form className="upload-form" onSubmit={onSubmit} noValidate>
               <div
-                className={`dropzone${dragOver ? " dropzone--active" : ""}${file ? " dropzone--has-file" : ""}`}
+                className={`dropzone${dragOver ? " dropzone--active" : ""}${documents.length ? " dropzone--has-file" : ""}`}
                 onDrop={onDrop}
                 onDragOver={onDragOver}
                 onDragLeave={onDragLeave}
@@ -199,8 +341,8 @@ export default function App() {
                   }
                 }}
                 role="button"
-                tabIndex={isLoading ? -1 : 0}
-                aria-disabled={isLoading}
+                tabIndex={busy ? -1 : 0}
+                aria-disabled={busy}
                 aria-describedby="pdf-hint"
               >
                 <input
@@ -210,83 +352,169 @@ export default function App() {
                   name="pdf"
                   type="file"
                   accept="application/pdf,.pdf"
+                  multiple
                   onChange={onFileChange}
-                  disabled={isLoading}
+                  disabled={busy}
                   tabIndex={-1}
                 />
-                {file ? (
-                  <div className="file-card">
-                    <PdfIcon />
-                    <div className="file-card__meta">
-                      <span className="file-card__name">{file.name}</span>
-                      <span className="file-card__size">{formatBytes(file.size)}</span>
-                    </div>
-                    <span className="file-card__action">Change file</span>
-                  </div>
+                {documents.length > 0 ? (
+                  <ul className="file-list" onClick={(e) => e.stopPropagation()}>
+                    {documents.map((doc) => (
+                      <li
+                        key={doc.id}
+                        className={`file-list__item${doc.status === "error" ? " file-list__item--error" : ""}`}
+                      >
+                        <ClinicalDocIcon />
+                        <div className="file-list__meta">
+                          <span className="file-list__name">{doc.name}</span>
+                          <span className="file-list__detail">
+                            {formatBytes(doc.fileBytes)}
+                            {doc.status === "ok" &&
+                              ` · ${doc.pageCount} pg · ${formatCount(doc.charCount)} chars`}
+                            {doc.status === "error" && ` · ${doc.error}`}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="file-list__remove"
+                          onClick={() => removeDocument(doc.id)}
+                          disabled={busy}
+                          aria-label={`Remove ${doc.name}`}
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 ) : (
                   <>
                     <div className="dropzone__icon-wrap">
-                      <PdfIcon />
+                      <ClinicalDocIcon />
                     </div>
                     <p className="dropzone__prompt">
-                      <strong>Choose a PDF</strong> or drag and drop here
+                      <strong>Choose up to {LIMITS.maxFiles} PDFs</strong> or drag
+                      and drop here
                     </p>
-                    <p className="dropzone__sub">Application/pdf · up to {MAX_MB} MB</p>
+                    <p className="dropzone__sub">
+                      Combined summary from all documents in one request
+                    </p>
                   </>
+                )}
+                {documents.length > 0 && (
+                  <p className="dropzone__add-more">Click to replace all files</p>
                 )}
               </div>
 
-              <ul className="limits" aria-label="Document limits">
-                {LIMITS.map((item) => (
-                  <li key={item.label} className="limits__item">
-                    <span className="limits__label">{item.label}</span>
-                    <span className="limits__value">{item.value}</span>
-                  </li>
-                ))}
-              </ul>
-
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={!file || isLoading}
-                aria-busy={isLoading}
-              >
-                {isLoading ? (
-                  <>
-                    <span className="spinner" aria-hidden="true" />
-                    Processing…
-                  </>
-                ) : (
-                  "Generate summary"
+              <div className="metrics-box">
+                <h3 className="metrics-box__title">Batch metrics</h3>
+                <ul className="limits" aria-label="Batch metrics and limits">
+                  {limitRows.map((item) => (
+                    <li
+                      key={item.key}
+                      className={`limits__item${item.over ? " limits__item--over" : item.ok ? " limits__item--ok" : ""}`}
+                    >
+                      <span className="limits__label">{item.label}</span>
+                      <span className="limits__value">{item.current}</span>
+                      <span className="limits__max">{item.max}</span>
+                    </li>
+                  ))}
+                </ul>
+                {totalBytes > 0 && (
+                  <p className="metrics-box__sub">
+                    Total upload size: {formatBytes(totalBytes)}
+                  </p>
                 )}
-              </button>
+              </div>
+
+              <div className="prompt-box" id="prompt">
+                <h3 className="prompt-box__title">Summarization instructions</h3>
+                <p className="prompt-box__desc">
+                  Choose a preset or write your own prompt. All documents are
+                  summarized together in one response.
+                </p>
+                <div className="preset-row" role="group" aria-label="Prompt presets">
+                  {PROMPT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`preset-chip${activePreset === preset.id ? " preset-chip--active" : ""}`}
+                      onClick={() => applyPreset(preset)}
+                      disabled={busy}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <label className="prompt-label" htmlFor="custom-prompt">
+                  Your instructions
+                </label>
+                <textarea
+                  id="custom-prompt"
+                  className="prompt-textarea"
+                  value={customPrompt}
+                  onChange={(e) => {
+                    setCustomPrompt(e.target.value);
+                    setActivePreset("custom");
+                  }}
+                  rows={6}
+                  disabled={busy}
+                  placeholder="Describe how you want the combined documents summarized…"
+                />
+              </div>
+
+              <div className="action-row">
+                <button
+                  type="submit"
+                  className="btn btn--green btn--lg"
+                  disabled={!docReady || isLoading || !customPrompt.trim()}
+                  aria-busy={isLoading}
+                >
+                  {isLoading ? (
+                    <>
+                      <span className="spinner" aria-hidden="true" />
+                      Summarizing…
+                    </>
+                  ) : analyzing ? (
+                    "Reading PDFs…"
+                  ) : (
+                    `Summarize ${okDocs.length || ""} document${okDocs.length === 1 ? "" : "s"}`
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--orange btn--lg"
+                  onClick={resetAll}
+                  disabled={documents.length === 0 || busy}
+                >
+                  Clear all
+                </button>
+              </div>
             </form>
 
             <section className="status" aria-live="polite">
               {status.type === "error" && (
                 <div className="alert alert--error" role="alert">
-                  <span className="alert__dot" aria-hidden="true" />
                   {status.message}
                 </div>
               )}
               {status.type === "success" && !isLoading && (
-                <div className="alert alert--success">
-                  <span className="alert__dot" aria-hidden="true" />
-                  {status.message}
-                </div>
+                <div className="alert alert--success">{status.message}</div>
               )}
             </section>
           </section>
 
           <section
             className="panel panel--result"
+            id="results"
             aria-labelledby="summary-heading"
           >
             <div className="panel__head">
               <h2 id="summary-heading" className="panel__title">
-                Summary
+                Unified clinical summary
               </h2>
-              <p className="panel__desc">~100–150 words when the source is long enough</p>
+              <p className="panel__desc">
+                One extraction across all uploaded documents
+              </p>
             </div>
 
             <div className="result-body">
@@ -303,30 +531,62 @@ export default function App() {
 
               {!isLoading && summary && (
                 <article className="summary-card">
-                  <div className="summary-card__label">Generated brief</div>
+                  <div className="summary-card__label">
+                    Combined extraction · {okDocs.length} document
+                    {okDocs.length === 1 ? "" : "s"}
+                  </div>
                   <div className="summary-text">{summary}</div>
+                  <p className="summary-disclaimer">
+                    AI-generated from uploaded text. Verify against original
+                    records before clinical decisions.
+                  </p>
                 </article>
               )}
 
               {showEmptySummary && (
                 <div className="result-empty">
-                  <div className="result-empty__lines" aria-hidden="true">
-                    <span />
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <p>Your summary will appear here after you upload a PDF and generate.</p>
+                  <ClinicalDocIcon />
+                  <p>
+                    Upload up to five PDFs, set your summarization instructions,
+                    then run <strong>Summarize documents</strong>.
+                  </p>
                 </div>
               )}
             </div>
           </section>
         </div>
 
-        <footer className="footer">
-          <span>Server-side validation · API key never exposed to the browser</span>
-        </footer>
-      </div>
+        <section className="trust-strip" aria-label="Features">
+          <div className="trust-strip__item">
+            <strong>Multi-document</strong>
+            <span>Up to 5 PDFs in one unified brief</span>
+          </div>
+          <div className="trust-strip__item">
+            <strong>Your prompt</strong>
+            <span>Presets or custom clinical instructions</span>
+          </div>
+          <div className="trust-strip__item">
+            <strong>Care coordination</strong>
+            <span>Cross-document facts in one view</span>
+          </div>
+        </section>
+      </main>
+
+      <footer className="site-footer" id="support">
+        <div className="site-footer__inner">
+          <p className="site-footer__brand">
+            Clinical document summarizer · MedKaz-inspired portal
+          </p>
+          <p className="site-footer__legal">
+            Handle PHI according to your organization&apos;s privacy and HIPAA
+            policies.
+          </p>
+          <p className="site-footer__copy">
+            © {new Date().getFullYear()} · Client-side PDF parsing · OpenAI
+            processing
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
