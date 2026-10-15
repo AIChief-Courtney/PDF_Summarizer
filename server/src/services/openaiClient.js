@@ -7,7 +7,7 @@ export function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) return null;
   if (!client || clientKey !== apiKey) {
-    client = new OpenAI({ apiKey, timeout: 120_000 });
+    client = new OpenAI({ apiKey, timeout: 300_000 });
     clientKey = apiKey;
   }
   return client;

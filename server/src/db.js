@@ -3,19 +3,15 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { loadEnv } from "./env.js";
+import { getDataDir, getUploadDir } from "./paths.js";
 
 loadEnv();
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir =
-  process.env.DATA_DIR?.trim() ||
-  (process.env.VERCEL
-    ? path.join("/tmp", "clinical-docs-rag")
-    : path.resolve(__dirname, "../../data"));
+const dataDir = getDataDir();
 const dbPath = path.join(dataDir, "app.db");
 
 fs.mkdirSync(dataDir, { recursive: true });
-fs.mkdirSync(path.join(dataDir, "uploads"), { recursive: true });
+fs.mkdirSync(getUploadDir(), { recursive: true });
 
 const globalKey = "__clinical_docs_sqlite__";
 function openDatabase() {

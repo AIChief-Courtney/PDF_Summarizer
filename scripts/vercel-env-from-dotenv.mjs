@@ -14,9 +14,9 @@ for (const name of vars) {
   const value = line.slice(name.length + 1).trim();
   if (!value) continue;
   const r = spawnSync(
-    "vercel",
+    process.platform === "win32" ? "vercel.cmd" : "vercel",
     ["env", "add", name, "production", "--force"],
-    { input: value, cwd: root, stdio: ["pipe", "inherit", "inherit"] }
+    { input: value, cwd: root, stdio: ["pipe", "inherit", "inherit"], shell: true }
   );
   if (r.status !== 0) process.exit(r.status ?? 1);
 }

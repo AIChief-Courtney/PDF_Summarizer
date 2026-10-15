@@ -2,17 +2,14 @@ import { Router } from "express";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import { v4 as uuid } from "uuid";
 import { db } from "../db.js";
+import { getUploadDir } from "../paths.js";
 import { createJob } from "../services/jobRunner.js";
 import { attachContext } from "../middleware/context.js";
 
 const router = Router();
-const uploadDir = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../../data/uploads"
-);
+const uploadDir = getUploadDir();
 fs.mkdirSync(uploadDir, { recursive: true });
 
 const upload = multer({

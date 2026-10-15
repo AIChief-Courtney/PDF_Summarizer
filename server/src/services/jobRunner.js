@@ -47,6 +47,10 @@ function updateJob(id, fields) {
 
 let processing = false;
 
+export function kickJobQueue() {
+  queueMicrotask(() => processNextJobs());
+}
+
 async function processNextJobs() {
   if (processing) return;
   processing = true;
