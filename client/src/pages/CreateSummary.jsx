@@ -31,12 +31,23 @@ export function CreateSummary() {
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  function loadDocs() {
     api.listDocuments().then((d) => {
-      const ready = (d.documents || []).filter((x) => x.status === "ready");
-      setDocs(ready);
-      setSelected(ready.map((x) => x.id));
+      const all = d.documents || [];
+      const ready = all.filter((x) => x.status === "ready");
+      setDocs(all);
+      setSelected((prev) => {
+        const readyIds = ready.map((x) => x.id);
+        if (!prev.length) return readyIds;
+        return prev.filter((id) => readyIds.includes(id));
+      });
     });
+  }
+
+  useEffect(() => {
+    loadDocs();
+    const t = setInterval(loadDocs, 3000);
+    return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
@@ -65,6 +76,10 @@ export function CreateSummary() {
         ...config,
         documentIds: selected,
       });
+      if (res.status === "completed" && res.result?.summaryId) {
+        navigate(`/summaries/${res.result.summaryId}`);
+        return;
+      }
       setJobId(res.jobId);
     } catch (err) {
       setError(err.message);
@@ -89,20 +104,34 @@ export function CreateSummary() {
           <h2 className="panel__title">A. Scope</h2>
           <p>Select documents ({selected.length} selected)</p>
           <ul className="select-list">
-            {docs.map((d) => (
-              <li key={d.id}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(d.id)}
-                    onChange={() => toggleDoc(d.id)}
-                  />
-                  {d.filename} · {d.pageCount ?? "?"} pages
-                </label>
-              </li>
-            ))}
+            {docs.map((d) => {
+              const selectable = d.status === "ready";
+              return (
+                <li key={d.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(d.id)}
+                      disabled={!selectable}
+                      onChange={() => toggleDoc(d.id)}
+                    />
+                    {d.filename} · {d.pageCount ?? "?"} pages ·{" "}
+                    <span className={`status-pill status-pill--${d.status}`}>
+                      {d.status}
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
           </ul>
-          {!docs.length && <p>No ready documents. Upload and wait for indexing.</p>}
+          {!docs.length && <p>No documents yet. Upload PDFs on the Documents page.</p>}
+          {docs.length > 0 &&
+            !docs.some((d) => d.status === "ready") && (
+              <p className="alert alert--error">
+                Documents are still processing. Ready items will become selectable
+                automatically.
+              </p>
+            )}
         </div>
 
         <div className="panel">

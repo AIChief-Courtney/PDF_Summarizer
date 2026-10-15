@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { db } from "../db.js";
-import { createJob, getJob } from "../services/jobRunner.js";
+import { createJob, drainJobQueue, getJob } from "../services/jobRunner.js";
+import { isServerless } from "../paths.js";
 import { attachContext } from "../middleware/context.js";
 import { getOpenAI, aiUnavailableMessage } from "../services/openaiClient.js";
 
@@ -26,7 +27,7 @@ router.get("/", (req, res) => {
   });
 });
 
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   if (!getOpenAI()) {
     res.status(503).json({ error: { message: aiUnavailableMessage() } });
     return;
@@ -50,6 +51,24 @@ router.post("/", (req, res) => {
     JSON.stringify(config),
     jobId
   );
+
+  if (isServerless()) {
+    try {
+      await drainJobQueue();
+    } catch (err) {
+      res.status(500).json({ error: { message: err.message || "Summary failed." } });
+      return;
+    }
+    const job = getJob(jobId);
+    res.status(job?.status === "completed" ? 201 : 202).json({
+      summaryId,
+      jobId,
+      status: job?.status || "queued",
+      result: job?.result || null,
+      error: job?.error || null,
+    });
+    return;
+  }
 
   res.status(202).json({ summaryId, jobId, status: "queued" });
 });

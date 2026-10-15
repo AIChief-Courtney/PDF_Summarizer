@@ -21,3 +21,11 @@ export function getDataDir() {
 export function getUploadDir() {
   return path.join(getDataDir(), "uploads");
 }
+
+export function isServerless() {
+  return (
+    process.env.VERCEL === "1" ||
+    process.env.VERCEL === "true" ||
+    process.cwd().startsWith("/var/task")
+  );
+}

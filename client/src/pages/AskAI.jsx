@@ -21,11 +21,31 @@ export function AskAI() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [documents, setDocuments] = useState([]);
+  const [scopeIds, setScopeIds] = useState([]);
+
+  useEffect(() => {
+    api.listDocuments().then((d) => {
+      const ready = (d.documents || []).filter((x) => x.status === "ready");
+      setDocuments(ready);
+      setScopeIds(ready.map((x) => x.id));
+    });
+    const t = setInterval(() => {
+      api.listDocuments().then((d) => {
+        const ready = (d.documents || []).filter((x) => x.status === "ready");
+        setDocuments(ready);
+        setScopeIds((prev) =>
+          prev.length ? prev.filter((id) => ready.some((r) => r.id === id)) : ready.map((x) => x.id)
+        );
+      });
+    }, 4000);
+    return () => clearInterval(t);
+  }, []);
 
   async function ensureConversation() {
     if (conversationId) return conversationId;
     const { conversationId: id } = await api.createConversation({
-      scope: {},
+      scope: { documentIds: scopeIds },
       sourceMode,
     });
     setConversationId(id);
@@ -70,6 +90,31 @@ export function AskAI() {
       </p>
 
       <div className="panel">
+        <h2 className="panel__title">Document scope</h2>
+        {!documents.length ? (
+          <p>Upload documents and wait until status is <strong>ready</strong>.</p>
+        ) : (
+          <ul className="select-list">
+            {documents.map((d) => (
+              <li key={d.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={scopeIds.includes(d.id)}
+                    onChange={() =>
+                      setScopeIds((prev) =>
+                        prev.includes(d.id)
+                          ? prev.filter((x) => x !== d.id)
+                          : [...prev, d.id]
+                      )
+                    }
+                  />
+                  {d.filename}
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
         <label>
           Source mode{" "}
           <select value={sourceMode} onChange={(e) => setSourceMode(e.target.value)}>

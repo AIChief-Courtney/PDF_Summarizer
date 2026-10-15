@@ -5,8 +5,9 @@ import fs from "fs";
 import { v4 as uuid } from "uuid";
 import { db } from "../db.js";
 import { getUploadDir } from "../paths.js";
-import { createJob } from "../services/jobRunner.js";
+import { createJob, drainJobQueue, kickJobQueue } from "../services/jobRunner.js";
 import { attachContext } from "../middleware/context.js";
+import { isServerless } from "../paths.js";
 
 const router = Router();
 const uploadDir = getUploadDir();
@@ -24,7 +25,7 @@ const upload = multer({
 
 router.use(attachContext);
 
-router.post("/", upload.array("files", 5), (req, res) => {
+router.post("/", upload.array("files", 5), async (req, res) => {
   const files = req.files || [];
   if (!files.length) {
     res.status(400).json({ error: { message: "No files uploaded." } });
@@ -56,10 +57,32 @@ router.post("/", upload.array("files", 5), (req, res) => {
     });
     created.push({ id, filename: file.originalname, status: "queued", jobId });
   }
-  res.status(201).json({ documents: created });
+
+  try {
+    if (isServerless()) {
+      await drainJobQueue();
+    }
+  } catch (err) {
+    res.status(500).json({
+      error: { message: err.message || "Document processing failed." },
+    });
+    return;
+  }
+
+  const withStatus = created.map((c) => {
+    const row = db.prepare("SELECT status, error_message FROM documents WHERE id = ?").get(c.id);
+    return {
+      ...c,
+      status: row?.status || c.status,
+      error: row?.error_message || null,
+    };
+  });
+
+  res.status(201).json({ documents: withStatus });
 });
 
 router.get("/", (req, res) => {
+  kickJobQueue();
   const q = (req.query.q || "").toString().toLowerCase();
   const status = req.query.status?.toString();
   let rows = db

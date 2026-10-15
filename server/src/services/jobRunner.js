@@ -4,14 +4,62 @@ import { db } from "../db.js";
 import { chunkPages, extractPagesFromPdf } from "./pdfIngest.js";
 import { upsertChunks, deleteDocumentVectors } from "./vectorStore.js";
 import { runSummaryJob } from "./summaryService.js";
+import { isServerless } from "../paths.js";
 
 export function createJob(type, payload) {
   const id = uuid();
   db.prepare(
     `INSERT INTO jobs (id, type, status, payload_json) VALUES (?, ?, 'queued', ?)`
   ).run(id, type, JSON.stringify(payload));
-  queueMicrotask(() => processNextJobs());
+  if (!isServerless()) {
+    queueMicrotask(() => processNextJobs());
+  }
   return id;
+}
+
+async function executeJobRow(job) {
+  updateJob(job.id, { status: "running", progress: 0.05 });
+  try {
+    if (job.type === "ingest_document") {
+      await runIngestJob(job);
+    } else if (job.type === "generate_summary") {
+      await runSummaryJob(job);
+    } else {
+      throw new Error(`Unknown job type: ${job.type}`);
+    }
+    updateJob(job.id, { status: "completed", progress: 1 });
+  } catch (err) {
+    updateJob(job.id, {
+      status: "failed",
+      error_message: err.message || String(err),
+    });
+    if (job.type === "generate_summary") {
+      try {
+        const payload = JSON.parse(job.payload_json);
+        if (payload.summaryId) {
+          db.prepare(`UPDATE summaries SET status = 'failed' WHERE id = ?`).run(
+            payload.summaryId
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    throw err;
+  }
+}
+
+/** Run all queued jobs (required on Vercel — no background worker after response). */
+export async function drainJobQueue() {
+  while (true) {
+    const job = db
+      .prepare(
+        "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+      )
+      .get();
+    if (!job) break;
+    await executeJobRow(job);
+  }
 }
 
 export function getJob(id) {
@@ -62,33 +110,10 @@ async function processNextJobs() {
         )
         .get();
       if (!job) break;
-      updateJob(job.id, { status: "running", progress: 0.05 });
       try {
-        if (job.type === "ingest_document") {
-          await runIngestJob(job);
-        } else if (job.type === "generate_summary") {
-          await runSummaryJob(job);
-        } else {
-          throw new Error(`Unknown job type: ${job.type}`);
-        }
-        updateJob(job.id, { status: "completed", progress: 1 });
-      } catch (err) {
-        updateJob(job.id, {
-          status: "failed",
-          error_message: err.message || String(err),
-        });
-        if (job.type === "generate_summary") {
-          try {
-            const payload = JSON.parse(job.payload_json);
-            if (payload.summaryId) {
-              db.prepare(
-                `UPDATE summaries SET status = 'failed' WHERE id = ?`
-              ).run(payload.summaryId);
-            }
-          } catch {
-            /* ignore */
-          }
-        }
+        await executeJobRow(job);
+      } catch {
+        /* errors recorded on job row */
       }
     }
   } finally {
